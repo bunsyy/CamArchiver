@@ -22,7 +22,7 @@ Do not proceed until you have both paths confirmed.
 Once you have both paths, run:
 
 ```bash
-python -m video_speedup.cli <input_folder> --output <output_folder> --chunk-duration 60 --speed 5
+python -m video_speedup.cli <input_folder> --output <output_folder> --chunk-duration 60 --speed 5 --compress
 ```
 
 - `<input_folder>` — the directory containing source videos

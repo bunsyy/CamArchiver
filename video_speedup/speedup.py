@@ -3,6 +3,7 @@ fallback strategies for corrupted audio streams."""
 from __future__ import annotations
 
 import logging
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,6 +47,7 @@ def speed_up_video(
     keep_fps: bool = True,
     target_fps: float | None = None,
     overlay_text: str | None = None,
+    compress: bool = False,
 ) -> SpeedupResult:
     """Speed up a single video file by `speed`x, preserving audio pitch.
 
@@ -70,18 +72,31 @@ def speed_up_video(
 
     af = atempo_chain(speed)
 
-    strategies = [
-        (
-            "aac_at",
-            [
-                "-c:a", "aac_at",
-                "-i", str(src),
-                "-filter_complex", f"[0:v]{vf}[v];[0:a]{af}[a]",
-                "-map", "[v]", "-map", "[a]",
-                "-c:a", "aac", "-b:a", "128k",
-                str(dest),
-            ],
-        ),
+    video_enc = (
+        ["-c:v", "libx265", "-crf", "23", "-preset", "fast", "-tag:v", "hvc1"]
+        if compress
+        else ["-c:v", "libx264"]
+    )
+
+    strategies = []
+
+    if sys.platform == "darwin":
+        strategies.append(
+            (
+                "aac_at",
+                [
+                    "-c:a", "aac_at",
+                    "-i", str(src),
+                    "-filter_complex", f"[0:v]{vf}[v];[0:a]{af}[a]",
+                    "-map", "[v]", "-map", "[a]",
+                    *video_enc,
+                    "-c:a", "aac", "-b:a", "128k",
+                    str(dest),
+                ],
+            )
+        )
+
+    strategies.append(
         (
             "native_tolerant",
             [
@@ -90,11 +105,12 @@ def speed_up_video(
                 "-i", str(src),
                 "-filter_complex", f"[0:v]{vf}[v];[0:a]{af}[a]",
                 "-map", "[v]", "-map", "[a]",
+                *video_enc,
                 "-c:a", "aac", "-b:a", "128k",
                 str(dest),
             ],
-        ),
-    ]
+        )
+    )
 
     last_err = ""
     for name, args in strategies:

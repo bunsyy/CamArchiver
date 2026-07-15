@@ -30,6 +30,7 @@ class StreamInfo:
     nb_frames: int | None
     r_frame_rate: str | None
     codec_type: str
+    codec_name: str | None = field(default=None)
     # Video-only fields (None for audio streams)
     width: int | None = field(default=None)
     height: int | None = field(default=None)
@@ -89,6 +90,7 @@ def probe(path: Path) -> ProbeResult:
             nb_frames=int(s["nb_frames"]) if s.get("nb_frames") else None,
             r_frame_rate=s.get("r_frame_rate"),
             codec_type=s.get("codec_type", ""),
+            codec_name=s.get("codec_name"),
             width=int(s["width"]) if s.get("width") else None,
             height=int(s["height"]) if s.get("height") else None,
         )
@@ -356,7 +358,15 @@ def concat_videos(chunk_paths: list[Path], dest: Path, log_path: Path) -> bool:
         "-safe", "0",
         "-i", str(list_path),
         "-c", "copy",
-        str(dest)
     ]
+
+    # If the chunks are HEVC, we must re-apply the hvc1 tag during concat,
+    # otherwise ffmpeg strips it and players (like QuickTime) won't see the video.
+    first_probe = probe(chunk_paths[0])
+    if first_probe and first_probe.video and first_probe.video.codec_name == "hevc":
+        args.extend(["-tag:v", "hvc1"])
+
+    args.append(str(dest))
+
     ok, _ = run_ffmpeg(args, log_path)
     return ok

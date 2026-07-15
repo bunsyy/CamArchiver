@@ -58,6 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
              "(default: 60). Use 0 to skip chunking.",
     )
     p.add_argument(
+        "--compress", action="store_true",
+        help="Encode output video with H.265 (HEVC) instead of H.264 for smaller file sizes.",
+    )
+    p.add_argument(
         "--fps", type=float, default=None,
         help="Force a specific output frame rate (default: keep source fps)",
     )
@@ -171,16 +175,17 @@ def main(argv: list[str] | None = None) -> int:
             do_chunk = chunk_duration > 0 and (duration is None or duration > chunk_duration)
 
             if do_chunk:
+                src_chunks_dir = chunks_dir / src.stem
                 log.info(f"\n[CHUNK] {src.name}  "
                          f"(duration={duration:.1f}s, chunk_duration={chunk_duration}s)")
                 try:
-                    chunks = chunk_video(src, chunks_dir, chunk_duration)
+                    chunks = chunk_video(src, src_chunks_dir, chunk_duration)
                 except FFToolError as e:
                     log.error(f"  -> FAILED to chunk: {e}")
                     total_failed += 1
                     day_failed = True
                     continue
-                log.info(f"  -> {len(chunks)} chunk(s) created in {chunks_dir.name}/")
+                log.info(f"  -> {len(chunks)} chunk(s) created in {chunks_dir.name}/{src.stem}/")
 
                 # Stamp each chunk with its sequential start time so it
                 # is self-describing even when processed independently.
@@ -261,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
                     keep_fps=args.fps is None,
                     target_fps=args.fps,
                     overlay_text=overlay_text,
+                    compress=args.compress,
                 )
 
                 if result.ok:
@@ -280,6 +286,8 @@ def main(argv: list[str] | None = None) -> int:
                 for chunk_path in chunks:
                     chunk_path.unlink(missing_ok=True)
                 try:
+                    src_chunks_dir.rmdir()
+                    # Attempt to remove parent chunks_dir if empty (silently fails if not empty)
                     chunks_dir.rmdir()
                 except OSError:
                     pass
@@ -289,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
             day_offset_seconds = current_offset_seconds
 
         if day_spedup_chunks and not day_failed:
-            merged_dest = out_root / f"{day}_merged{day_spedup_chunks[0].suffix}"
+            merged_dest = out_root / f"{day}{day_spedup_chunks[0].suffix}"
             log.info(f"\n[CONCAT] Merging {len(day_spedup_chunks)} videos into {merged_dest.name}...")
             concat_log = log_dir / f"{day}_concat.log"
             if concat_videos(day_spedup_chunks, merged_dest, concat_log):

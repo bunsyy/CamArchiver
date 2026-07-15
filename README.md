@@ -40,9 +40,12 @@ python3 -m video_speedup.cli /path/to/videos
 video-speedup /path/to/videos --output /path/to/output
 python3 -m video_speedup.cli /path/to/videos -o /path/to/output
 
-# Full example: 5x speed, 60s chunks, custom output
-video-speedup /path/to/videos -o /path/to/output --speed 5 --chunk-duration 60
-python3 -m video_speedup.cli /path/to/videos -o /path/to/output --speed 5 --chunk-duration 60
+# Compress to H.265 (HEVC) for smaller file sizes
+video-speedup /path/to/videos --compress
+
+# Full example: 5x speed, 60s chunks, H.265 compression, custom output
+video-speedup /path/to/videos -o /path/to/output --speed 5 --chunk-duration 60 --compress
+python3 -m video_speedup.cli /path/to/videos -o /path/to/output --speed 5 --chunk-duration 60 --compress
 ```
 
 > `python3 -m video_speedup.cli` is equivalent to the `video-speedup` command and works without installing the package — just `cd` into the repo root first.
@@ -51,6 +54,7 @@ python3 -m video_speedup.cli /path/to/videos -o /path/to/output --speed 5 --chun
 ### Features
 
 - **Chunking for Stability**: Use `--chunk-duration` to split large videos before processing. This prevents OOM errors or audio drift on long recordings. Temporary chunks are placed in a `chunks/` folder and cleaned up automatically.
+- **H.265 Compression**: Use `--compress` to encode output videos with HEVC (H.265) at CRF 23. This significantly reduces output file size compared to default H.264 while maintaining excellent visual quality.
 - **Accurate Timestamps**: Burns an overlay in the bottom-left corner with the exact recording date and time (precise to the millisecond). Derived from the container's `creation_time` metadata or the filename pattern (`YYYY_MMDD_HHMMSS_mmm.MP4`).
 - **Automatic Merging**: Groups source videos by day, processes them, and uses FFmpeg's `concat` demuxer to losslessly merge the speed-up chunks of each day together.
 - **Flexible Output**: Use `-o / --output <DIR>` to specify exactly where merged videos are written. Without it, outputs go to `<input>/x{speed}/` automatically.
