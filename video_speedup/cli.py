@@ -5,6 +5,7 @@ import argparse
 import datetime
 import logging
 import sys
+import time
 from pathlib import Path
 
 from .ffutil import (
@@ -114,6 +115,7 @@ def _get_duration(path: Path) -> float | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    start_time = time.time()
     args = build_parser().parse_args(argv)
 
     logging.basicConfig(
@@ -213,6 +215,13 @@ def main(argv: list[str] | None = None) -> int:
     for day, day_videos in sorted(videos_by_day.items()):
         log.info(f"\n{'=' * 60}\nProcessing day: {day}\n{'=' * 60}")
         day_videos.sort(key=lambda p: p.name)
+        
+        # Check if the final merged video for this day already exists in the output folder
+        merged_dest = out_root / f"{day}{day_videos[0].suffix}"
+        if merged_dest.exists():
+            log.info(f"  [SKIP] Merged video '{merged_dest.name}' already exists in target folder. Skipping this day.")
+            total_skipped += len(day_videos)
+            continue
         
         day_spedup_chunks = []
         day_failed = False
@@ -369,7 +378,6 @@ def main(argv: list[str] | None = None) -> int:
 
         if day_spedup_chunks and not day_failed:
             log.info("\n--- Phase 3: Clean Up & Merge ---")
-            merged_dest = out_root / f"{day}{day_spedup_chunks[0].suffix}"
             log.info(f"\n[CONCAT] Merging {len(day_spedup_chunks)} videos into {merged_dest.name}...")
             concat_log = log_dir / f"{day}_concat.log"
             if concat_videos(day_spedup_chunks, merged_dest, concat_log):
@@ -391,8 +399,12 @@ def main(argv: list[str] | None = None) -> int:
                 log.error(f"  -> Concat FAILED. See {concat_log}")
 
     log.info("\n" + "-" * 60)
+    
+    elapsed_seconds = time.time() - start_time
+    elapsed_str = str(datetime.timedelta(seconds=int(elapsed_seconds)))
+    
     log.info(
-        f"Done. Processed: {total_processed} | "
+        f"Done in {elapsed_str}. Processed: {total_processed} | "
         f"Skipped: {total_skipped} | Failed: {total_failed}"
     )
     log.info(f"Per-file ffmpeg logs saved in: {log_dir}")

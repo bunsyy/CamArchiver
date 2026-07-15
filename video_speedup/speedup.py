@@ -75,14 +75,22 @@ def speed_up_video(
 
     out_fps: float | None = target_fps if (not keep_fps and target_fps) else src_fps
 
-    # Build video filter chain
-    vf = f"setpts=PTS/{speed}"
+    # Build video filter chain.
+    # IMPORTANT: drawtext MUST be applied before setpts so that the burnt-in
+    # timestamps reflect original real-world time (and fly by at 5x speed), 
+    # rather than ticking slowly against the compressed PTS.
+    vf_parts = []
+    if overlay_text:
+        vf_parts.append(make_drawtext_filter(overlay_text))
+    
+    vf_parts.append(f"setpts=PTS/{speed}")
+    
     if out_fps:
         # Always lock output to a fixed fps — prevents QuickTime from showing
         # the slow-motion scrubber bar that appears on high-fps source videos.
-        vf += f",fps={out_fps:.6g}"
-    if overlay_text:
-        vf += f",{make_drawtext_filter(overlay_text)}"
+        vf_parts.append(f"fps={out_fps:.6g}")
+        
+    vf = ",".join(vf_parts)
 
     af = atempo_chain(speed)
 
