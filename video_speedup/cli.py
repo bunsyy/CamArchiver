@@ -186,8 +186,9 @@ def main(argv: list[str] | None = None) -> int:
     log_dir = folder / ".video_speedup_logs"
     log_dir.mkdir(exist_ok=True)
 
-    # Intermediate chunk files land here
-    chunks_dir = folder / "chunks"
+    # Intermediate chunk files land here (in current working directory)
+    chunks_dir = Path.cwd() / "chunks"
+    chunks_dir.mkdir(parents=True, exist_ok=True)
 
     source_videos = find_videos(folder)
     source_videos = [v for v in source_videos if not v.stem.endswith(suffix) and not v.stem.endswith("_merged")]
@@ -221,14 +222,40 @@ def main(argv: list[str] | None = None) -> int:
         day_offset_seconds: float | None = None
         day_date_str: str | None = None
 
+        log.info("\n--- Phase 1: Chunking ---")
+        day_tasks = []
+
         for src in day_videos:
             duration = _get_duration(src)
             do_chunk = chunk_duration > 0 and (duration is None or duration > chunk_duration)
+            src_probe = _get_probe(src)
+
+            # Try to seed the clock from metadata/filename for THIS source file.
+            start_dt = _parse_metadata_start_time(src_probe) if src_probe else None
+            if start_dt:
+                day_date_str = start_dt.strftime("%Y-%m-%d")
+                day_offset_seconds = (
+                    start_dt.hour * 3600
+                    + start_dt.minute * 60
+                    + start_dt.second
+                    + start_dt.microsecond / 1e6
+                )
+                log.info(f"  [TIME] Seeded from metadata creation_time → {start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} UTC")
+            elif day_offset_seconds is not None:
+                log.info(f"  [TIME] No 'creation_time' metadata found in {src.name}. Continuing from previous file's clock.")
+            else:
+                log.warning(
+                    f"  [TIME] No 'creation_time' metadata found in {src.name}. "
+                    "Timestamp overlay will be disabled for this file."
+                )
+
+            # Capture the start time for THIS specific source file before we advance it
+            file_start_date_str = day_date_str
+            file_start_offset_seconds = day_offset_seconds
 
             if do_chunk:
                 src_chunks_dir = chunks_dir / src.stem
-                log.info(f"\n[CHUNK] {src.name}  "
-                         f"(duration={duration:.1f}s, chunk_duration={chunk_duration}s)")
+                log.info(f"\n[CHUNK] {src.name} (duration={duration:.1f}s, chunk_duration={chunk_duration}s)")
                 try:
                     chunks = chunk_video(src, src_chunks_dir, chunk_duration)
                 except FFToolError as e:
@@ -238,8 +265,7 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 log.info(f"  -> {len(chunks)} chunk(s) created in {chunks_dir.name}/{src.stem}/")
 
-                # Stamp each chunk with its sequential start time so it
-                # is self-describing even when processed independently.
+                # Stamp each chunk with its sequential start time
                 if day_date_str and day_offset_seconds is not None:
                     base_date = datetime.datetime.strptime(day_date_str, "%Y-%m-%d").replace(
                         tzinfo=datetime.timezone.utc
@@ -253,36 +279,38 @@ def main(argv: list[str] | None = None) -> int:
                             log.warning(f"  [TIME] Could not stamp {chunk_path.name}: {e}")
                         chunk_dur = _get_duration(chunk_path) or chunk_duration
                         stamp_offset += chunk_dur
+                    
+                    # Advance the global clock for the NEXT source file (if it lacks metadata)
+                    day_offset_seconds = stamp_offset
             else:
                 chunks = [src]
-                log.info(f"\n[PROCESS] {src.name}  "
-                         f"(duration={duration:.1f}s, no chunking needed)")
+                src_chunks_dir = None
+                log.info(f"\n[PROCESS] {src.name} (duration={duration:.1f}s, no chunking needed)")
 
-            src_probe = _get_probe(src)
+                # Advance the global clock for the NEXT source file (if it lacks metadata)
+                if day_offset_seconds is not None:
+                    day_offset_seconds += duration if duration else 0
 
-            # Only seed the clock from metadata/filename for the very first
-            # source file of the day.  Subsequent files continue where the
-            # previous one left off so the timer never jumps backward.
-            if day_offset_seconds is None:
-                start_dt = _parse_metadata_start_time(src_probe) if src_probe else None
-                if start_dt:
-                    day_date_str = start_dt.strftime("%Y-%m-%d")
-                    day_offset_seconds = (
-                        start_dt.hour * 3600
-                        + start_dt.minute * 60
-                        + start_dt.second
-                        + start_dt.microsecond / 1e6
-                    )
-                    log.info(f"  [TIME] Seeded from metadata creation_time → {start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} UTC")
-                else:
-                    log.warning(
-                        f"  [TIME] No 'creation_time' metadata found in {src.name}. "
-                        "Timestamp overlay will be disabled for this day."
-                    )
+            day_tasks.append({
+                "src_probe": src_probe,
+                "chunks": chunks,
+                "do_chunk": do_chunk,
+                "src_chunks_dir": src_chunks_dir,
+                "start_date_str": file_start_date_str,
+                "start_offset_seconds": file_start_offset_seconds,
+            })
 
-            current_date_str = day_date_str
-            current_offset_seconds = day_offset_seconds
+        if day_failed:
+            continue
 
+        log.info("\n--- Phase 2: Speed Up ---")
+
+        for task in day_tasks:
+            src_probe = task["src_probe"]
+            chunks = task["chunks"]
+            current_date_str = task["start_date_str"]
+            current_offset_seconds = task["start_offset_seconds"]
+            
             chunk_failed_any = False
             source_spedup_chunks = []
             
@@ -297,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
                         pts_offset_seconds=current_offset_seconds,
                     )
 
-                dest = folder / f"{chunk_path.stem}{suffix}{chunk_path.suffix}"
+                dest = chunks_dir / f"{chunk_path.stem}{suffix}{chunk_path.suffix}"
 
                 # Probe chunk before speedup to add to exact offset
                 if current_offset_seconds is not None:
@@ -336,27 +364,27 @@ def main(argv: list[str] | None = None) -> int:
                     day_failed = True
                     log.error(f"    -> FAILED: {result.message}")
 
-            if do_chunk and not args.keep_chunks and not chunk_failed_any:
-                for chunk_path in chunks:
-                    chunk_path.unlink(missing_ok=True)
-                try:
-                    src_chunks_dir.rmdir()
-                    # Attempt to remove parent chunks_dir if empty (silently fails if not empty)
-                    chunks_dir.rmdir()
-                except OSError:
-                    pass
-
+            task["chunk_failed_any"] = chunk_failed_any
             day_spedup_chunks.extend(source_spedup_chunks)
-            # Carry the accumulated offset into the next source file.
-            day_offset_seconds = current_offset_seconds
 
         if day_spedup_chunks and not day_failed:
+            log.info("\n--- Phase 3: Clean Up & Merge ---")
             merged_dest = out_root / f"{day}{day_spedup_chunks[0].suffix}"
             log.info(f"\n[CONCAT] Merging {len(day_spedup_chunks)} videos into {merged_dest.name}...")
             concat_log = log_dir / f"{day}_concat.log"
             if concat_videos(day_spedup_chunks, merged_dest, concat_log):
                 log.info(f"  -> Concat OK: {merged_dest.name}")
                 if not args.keep_chunks:
+                    # Clean up raw chunks
+                    for task in day_tasks:
+                        if task["do_chunk"] and not task["chunk_failed_any"]:
+                            for chunk_path in task["chunks"]:
+                                chunk_path.unlink(missing_ok=True)
+                            try:
+                                if task["src_chunks_dir"]: task["src_chunks_dir"].rmdir()
+                            except OSError:
+                                pass
+                    # Clean up sped-up chunks
                     for p in day_spedup_chunks:
                         p.unlink(missing_ok=True)
             else:
@@ -368,6 +396,12 @@ def main(argv: list[str] | None = None) -> int:
         f"Skipped: {total_skipped} | Failed: {total_failed}"
     )
     log.info(f"Per-file ffmpeg logs saved in: {log_dir}")
+
+    if not args.keep_chunks:
+        try:
+            chunks_dir.rmdir()
+        except OSError:
+            pass
     return 0 if total_failed == 0 else 2
 
 
