@@ -11,7 +11,7 @@ from .ffutil import (
     FFToolError, ProbeResult, atempo_chain, check_tools_available,
     chunk_video, make_overlay_text, probe,
     _parse_metadata_start_time, _parse_filename_date, concat_videos,
-    stamp_chunk_creation_time,
+    stamp_chunk_creation_time, detect_gpu_encoder,
 )
 from .speedup import speed_up_video
 
@@ -66,6 +66,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"],
         help="x265 encoder preset when --compress is used (default: medium). "
              "Slower presets produce smaller files at the same quality.",
+    )
+    p.add_argument(
+        "--gpu", action="store_true",
+        help="Use GPU-accelerated encoding via VideoToolbox (macOS) / NVENC (NVIDIA) / VAAPI (Linux). "
+             "Falls back to CPU if no GPU encoder is found.",
+    )
+    p.add_argument(
+        "--gpu-quality", type=int, default=None, metavar="N",
+        help="Quality for GPU encoders. Auto-selected based on the encoder: "
+             "65 for VideoToolbox (-q:v, 1-100), or 28 for NVENC/VAAPI (-cq/-qp, 0-51).",
     )
     p.add_argument(
         "--fps", type=float, default=None,
@@ -130,11 +140,46 @@ def main(argv: list[str] | None = None) -> int:
     out_root: Path = args.output if args.output else folder / f"x{speed:g}"
     out_root.mkdir(parents=True, exist_ok=True)
 
-    log.info(f"Speed: {speed}x  |  Chunk duration: {chunk_duration}s  |  "
-             f"Audio filter: {atempo_chain(speed)}")
-    log.info(f"Input  folder: {folder}")
-    log.info(f"Output folder: {out_root}")
+    # ── Resolve encoder (once, so we can report it in the banner) ────────────
+    if args.gpu:
+        gpu_enc, gpu_label = detect_gpu_encoder(compress=args.compress)
+    else:
+        gpu_enc, gpu_label = None, None
+
+    if gpu_enc:
+        enc_backend  = f"GPU  ({gpu_label})"
+        enc_name     = gpu_enc
+        enc_extra    = ""  # VideoToolbox / NVENC don't use libx265 presets
+    else:
+        if args.gpu:
+            # --gpu was requested but nothing found — warn and fall back
+            log.warning("⚠  No GPU encoder found (VideoToolbox / NVENC / VAAPI). Falling back to CPU.")
+        enc_backend = "CPU"
+        if args.compress:
+            enc_name  = "libx265 (HEVC/H.265)"
+            enc_extra = f"  preset={args.preset}"
+        else:
+            enc_name  = "libx264 (H.264)"
+            enc_extra = ""
+
+    chunk_info = f"{chunk_duration}s" if chunk_duration > 0 else "disabled"
+    fps_info   = f"{args.fps}" if args.fps else "source fps"
+    overlay_info = "off" if args.no_overlay else "on"
+
+    log.info("=" * 60)
+    log.info("  video_speedup — encoding settings")
+    log.info("=" * 60)
+    log.info(f"  Encoding     : {enc_backend}")
+    log.info(f"  Video codec  : {enc_name}{enc_extra}")
+    log.info(f"  Audio filter : {atempo_chain(speed)}")
+    log.info(f"  Speed        : {speed:g}x")
+    log.info(f"  Chunk        : {chunk_info}")
+    log.info(f"  FPS          : {fps_info}")
+    log.info(f"  Overlay      : {overlay_info}")
     log.info("-" * 60)
+    log.info(f"  Input        : {folder}")
+    log.info(f"  Output       : {out_root}")
+    log.info("=" * 60)
 
     # Per-file ffmpeg logs always live alongside the input files so the
     # log path is predictable regardless of where --output points.
@@ -274,6 +319,8 @@ def main(argv: list[str] | None = None) -> int:
                     overlay_text=overlay_text,
                     compress=args.compress,
                     preset=args.preset,
+                    use_gpu=args.gpu,
+                    gpu_quality=args.gpu_quality,
                 )
 
                 if result.ok:
@@ -325,4 +372,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        sys.exit(130)  # conventional exit code for Ctrl+C

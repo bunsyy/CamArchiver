@@ -24,6 +24,53 @@ def check_tools_available() -> None:
         )
 
 
+# Encoder candidates in priority order per codec.
+# Each entry: (h264_encoder, hevc_encoder, display_name)
+_GPU_ENCODER_CANDIDATES: list[tuple[str, str, str]] = [
+    # macOS VideoToolbox (always present on Mac, works on both Intel & Apple Silicon)
+    ("h264_videotoolbox", "hevc_videotoolbox", "VideoToolbox"),
+    # NVIDIA NVENC (Linux / Windows with NVIDIA GPU)
+    ("h264_nvenc",        "hevc_nvenc",        "NVENC"),
+    # Intel/AMD VAAPI (Linux open-source driver stack)
+    ("h264_vaapi",        "hevc_vaapi",        "VAAPI"),
+]
+
+
+def _ffmpeg_encoders() -> set[str]:
+    """Return the set of encoder names reported by `ffmpeg -encoders`."""
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-encoders"],
+        capture_output=True, text=True,
+    )
+    # Each encoder line looks like:  " V..... h264_nvenc    ..."
+    # Guard against header/separator lines that start with a space but have < 2 tokens.
+    result = set()
+    for line in proc.stdout.splitlines():
+        if line.startswith(" "):
+            parts = line.split()
+            if len(parts) > 1:
+                result.add(parts[1])
+    return result
+
+
+def detect_gpu_encoder(compress: bool = False) -> tuple[str, str] | tuple[None, None]:
+    """Detect the best available GPU video encoder on the current system.
+
+    Args:
+        compress: If True, prefer HEVC encoders; otherwise prefer H.264.
+
+    Returns:
+        (encoder_name, display_name) if a GPU encoder is available,
+        (None, None) if no GPU encoder is found (caller should fall back to CPU).
+    """
+    available = _ffmpeg_encoders()
+    for h264_enc, hevc_enc, label in _GPU_ENCODER_CANDIDATES:
+        enc = hevc_enc if compress else h264_enc
+        if enc in available:
+            return enc, label
+    return None, None
+
+
 @dataclass
 class StreamInfo:
     duration: float | None
@@ -336,9 +383,20 @@ def run_ffmpeg(args: list[str], log_path: Path) -> tuple[bool, str]:
     """Run an ffmpeg command, capturing stderr to log_path.
     Returns (success, stderr_text)."""
     cmd = ["ffmpeg", "-loglevel", "error", "-y", *args]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    log_path.write_text(proc.stderr)
-    return proc.returncode == 0, proc.stderr
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        _, stderr_bytes = proc.communicate()
+    except KeyboardInterrupt:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        log_path.write_text("Interrupted by user (Ctrl+C).")
+        raise  # re-raise so the caller / main() can exit cleanly
+    stderr = stderr_bytes.decode(errors="replace")
+    log_path.write_text(stderr)
+    return proc.returncode == 0, stderr
 
 
 def concat_videos(chunk_paths: list[Path], dest: Path, log_path: Path) -> bool:

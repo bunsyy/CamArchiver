@@ -43,6 +43,12 @@ python3 -m video_speedup.cli /path/to/videos -o /path/to/output
 # Compress to H.265 (HEVC) for smaller file sizes
 video-speedup /path/to/videos --compress
 
+# Use GPU acceleration for much faster encoding (auto-detects macOS/Ubuntu GPU)
+video-speedup /path/to/videos --gpu
+
+# GPU acceleration + H.265 compression
+video-speedup /path/to/videos --gpu --compress
+
 # Full example: 5x speed, 60s chunks, H.265 compression, custom output
 video-speedup /path/to/videos -o /path/to/output --speed 5 --chunk-duration 60 --compress
 python3 -m video_speedup.cli /path/to/videos -o /path/to/output --speed 5 --chunk-duration 60 --compress
@@ -54,7 +60,13 @@ python3 -m video_speedup.cli /path/to/videos -o /path/to/output --speed 5 --chun
 ### Features
 
 - **Chunking for Stability**: Use `--chunk-duration` to split large videos before processing. This prevents OOM errors or audio drift on long recordings. Temporary chunks are placed in a `chunks/` folder and cleaned up automatically.
-- **H.265 Compression**: Use `--compress` to encode output videos with HEVC (H.265) at CRF 23. This significantly reduces output file size compared to default H.264 while maintaining excellent visual quality.
+- **GPU Acceleration**: Use `--gpu` to encode using hardware acceleration for massive speedups. The tool automatically detects your system:
+  - **macOS**: Uses VideoToolbox (`h264_videotoolbox` / `hevc_videotoolbox`).
+  - **Ubuntu (NVIDIA)**: Uses NVENC (`h264_nvenc` / `hevc_nvenc`).
+  - **Ubuntu (Intel/AMD)**: Uses VAAPI (`h264_vaapi` / `hevc_vaapi`).
+  *If no GPU is found, it gracefully falls back to CPU encoding.*
+- **GPU Quality Tuning**: Use `--gpu-quality N` to control output quality. The script automatically sets the correct underlying flag (`-q:v`, `-cq`, or `-qp`) depending on the detected GPU encoder. The default values (65 for VideoToolbox, 28 for NVENC/VAAPI) are tuned to produce file sizes and quality similar to CPU `-crf 23`.
+- **H.265 Compression**: Use `--compress` to encode output videos with HEVC (H.265). This significantly reduces output file size compared to default H.264 while maintaining excellent visual quality. (Combines with `--gpu` to use GPU HEVC encoders).
 - **Accurate Timestamps**: Burns an overlay in the bottom-left corner with the exact recording date and time (precise to the millisecond). Derived from the container's `creation_time` metadata or the filename pattern (`YYYY_MMDD_HHMMSS_mmm.MP4`).
 - **Automatic Merging**: Groups source videos by day, processes them, and uses FFmpeg's `concat` demuxer to losslessly merge the speed-up chunks of each day together.
 - **Flexible Output**: Use `-o / --output <DIR>` to specify exactly where merged videos are written. Without it, outputs go to `<input>/x{speed}/` automatically.

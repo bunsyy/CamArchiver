@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .ffutil import ProbeResult, atempo_chain, make_drawtext_filter, probe, run_ffmpeg
+from .ffutil import ProbeResult, atempo_chain, make_drawtext_filter, probe, run_ffmpeg, detect_gpu_encoder
 
 log = logging.getLogger("video_speedup")
 
@@ -49,6 +49,8 @@ def speed_up_video(
     overlay_text: str | None = None,
     compress: bool = False,
     preset: str = "fast",
+    use_gpu: bool = False,
+    gpu_quality: int | None = None,
 ) -> SpeedupResult:
     """Speed up a single video file by `speed`x, preserving audio pitch.
 
@@ -65,19 +67,59 @@ def speed_up_video(
     src_probe = probe(src)
     expected = _expected_output_duration(src_probe, speed)
 
+    # Determine output fps: explicit target, or keep source fps (default)
+    src_fps: float | None = None
+    if src_probe.video:
+        from .ffutil import _parse_frame_rate
+        src_fps = _parse_frame_rate(src_probe.video.r_frame_rate)
+
+    out_fps: float | None = target_fps if (not keep_fps and target_fps) else src_fps
+
+    # Build video filter chain
     vf = f"setpts=PTS/{speed}"
-    if not keep_fps and target_fps:
-        vf += f",fps={target_fps}"
+    if out_fps:
+        # Always lock output to a fixed fps — prevents QuickTime from showing
+        # the slow-motion scrubber bar that appears on high-fps source videos.
+        vf += f",fps={out_fps:.6g}"
     if overlay_text:
         vf += f",{make_drawtext_filter(overlay_text)}"
 
     af = atempo_chain(speed)
 
-    video_enc = (
-        ["-c:v", "libx265", "-crf", "23", "-preset", preset, "-tag:v", "hvc1"]
-        if compress
-        else ["-c:v", "libx264"]
-    )
+    if use_gpu:
+        gpu_enc, gpu_label = detect_gpu_encoder(compress=compress)
+        if gpu_enc:
+            # Determine appropriate quality flag and default based on encoder type
+            if gpu_label == "VideoToolbox":
+                quality_flag = "-q:v"
+                q_val = str(gpu_quality if gpu_quality is not None else 65)
+            elif gpu_label == "NVENC":
+                quality_flag = "-cq"
+                q_val = str(gpu_quality if gpu_quality is not None else 28)
+            elif gpu_label == "VAAPI":
+                quality_flag = "-qp"
+                q_val = str(gpu_quality if gpu_quality is not None else 28)
+            else:
+                quality_flag = "-q:v"
+                q_val = str(gpu_quality if gpu_quality is not None else 65)
+
+            if compress:
+                video_enc = ["-c:v", gpu_enc, quality_flag, q_val, "-tag:v", "hvc1"]
+            else:
+                video_enc = ["-c:v", gpu_enc, quality_flag, q_val]
+        else:
+            log.warning(
+                "  [GPU] --gpu requested but no supported GPU encoder found "
+                "(VideoToolbox / NVENC / VAAPI). Falling back to CPU encoding."
+            )
+            use_gpu = False  # triggers the CPU branch below
+
+    if not use_gpu:
+        video_enc = (
+            ["-c:v", "libx265", "-crf", "23", "-preset", preset, "-tag:v", "hvc1"]
+            if compress
+            else ["-c:v", "libx264"]
+        )
 
     strategies = []
 
