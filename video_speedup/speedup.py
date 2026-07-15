@@ -48,6 +48,7 @@ def speed_up_video(
     target_fps: float | None = None,
     overlay_text: str | None = None,
     compress: bool = False,
+    preset: str = "fast",
 ) -> SpeedupResult:
     """Speed up a single video file by `speed`x, preserving audio pitch.
 
@@ -73,7 +74,7 @@ def speed_up_video(
     af = atempo_chain(speed)
 
     video_enc = (
-        ["-c:v", "libx265", "-crf", "23", "-preset", "fast", "-tag:v", "hvc1"]
+        ["-c:v", "libx265", "-crf", "23", "-preset", preset, "-tag:v", "hvc1"]
         if compress
         else ["-c:v", "libx264"]
     )

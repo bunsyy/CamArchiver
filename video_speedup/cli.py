@@ -62,6 +62,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Encode output video with H.265 (HEVC) instead of H.264 for smaller file sizes.",
     )
     p.add_argument(
+        "--preset", default="medium",
+        choices=["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"],
+        help="x265 encoder preset when --compress is used (default: medium). "
+             "Slower presets produce smaller files at the same quality.",
+    )
+    p.add_argument(
         "--fps", type=float, default=None,
         help="Force a specific output frame rate (default: keep source fps)",
     )
@@ -267,6 +273,7 @@ def main(argv: list[str] | None = None) -> int:
                     target_fps=args.fps,
                     overlay_text=overlay_text,
                     compress=args.compress,
+                    preset=args.preset,
                 )
 
                 if result.ok:
