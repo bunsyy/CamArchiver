@@ -1,0 +1,16 @@
+[project]
+name = "video-speedup"
+version = "0.1.0"
+description = "Speed up videos while preserving audio pitch, tolerant of corrupted AAC streams"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+video-speedup = "video_speedup.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["video_speedup"]
