@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import logging
 import sys
 from pathlib import Path
 
-from .ffutil import FFToolError, ProbeResult, atempo_chain, check_tools_available, chunk_video, make_overlay_text, probe
+from .ffutil import (
+    FFToolError, ProbeResult, atempo_chain, check_tools_available,
+    chunk_video, make_overlay_text, probe,
+    _parse_metadata_start_time, _parse_filename_date, concat_videos,
+    stamp_chunk_creation_time,
+)
 from .speedup import speed_up_video
 
 log = logging.getLogger("video_speedup")
@@ -37,7 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
             "while preserving audio pitch. Tolerant of corrupted AAC streams."
         ),
     )
-    p.add_argument("folder", type=Path, help="Folder containing video files")
+    p.add_argument("folder", type=Path, help="Input folder containing source video files")
+    p.add_argument(
+        "-o", "--output", type=Path, default=None, metavar="DIR",
+        help="Output folder for merged videos (default: <folder>/x{speed}/ is created automatically)",
+    )
     p.add_argument(
         "-s", "--speed", type=float, default=5.0,
         help="Speed multiplier (default: 5.0)",
@@ -106,12 +116,18 @@ def main(argv: list[str] | None = None) -> int:
     chunk_duration: float = args.chunk_duration
     suffix: str = args.suffix or f"_{speed:g}x"
 
+    # Resolve output folder: explicit --output, or auto <folder>/x{speed}/
+    out_root: Path = args.output if args.output else folder / f"x{speed:g}"
+    out_root.mkdir(parents=True, exist_ok=True)
+
     log.info(f"Speed: {speed}x  |  Chunk duration: {chunk_duration}s  |  "
              f"Audio filter: {atempo_chain(speed)}")
-    log.info(f"Source folder: {folder}")
+    log.info(f"Input  folder: {folder}")
+    log.info(f"Output folder: {out_root}")
     log.info("-" * 60)
 
-    # Per-file ffmpeg logs land here
+    # Per-file ffmpeg logs always live alongside the input files so the
+    # log path is predictable regardless of where --output points.
     log_dir = folder / ".video_speedup_logs"
     log_dir.mkdir(exist_ok=True)
 
@@ -119,94 +135,170 @@ def main(argv: list[str] | None = None) -> int:
     chunks_dir = folder / "chunks"
 
     source_videos = find_videos(folder)
-    source_videos = [v for v in source_videos if not v.stem.endswith(suffix)]
+    source_videos = [v for v in source_videos if not v.stem.endswith(suffix) and not v.stem.endswith("_merged")]
 
     if not source_videos:
         log.info(f"No video files found in {folder}")
         return 0
 
-    log.info(f"Found {len(source_videos)} source video(s).")
+    from collections import defaultdict
+    videos_by_day = defaultdict(list)
+    for v in source_videos:
+        day = _parse_filename_date(v.stem)
+        if day:
+            videos_by_day[day].append(v)
+        else:
+            videos_by_day["unknown_date"].append(v)
+
+    log.info(f"Found {len(source_videos)} source video(s) across {len(videos_by_day)} day(s).")
 
     total_processed = total_skipped = total_failed = 0
 
-    for src in source_videos:
-        duration = _get_duration(src)
-        do_chunk = chunk_duration > 0 and (duration is None or duration > chunk_duration)
+    for day, day_videos in sorted(videos_by_day.items()):
+        log.info(f"\n{'=' * 60}\nProcessing day: {day}\n{'=' * 60}")
+        day_videos.sort(key=lambda p: p.name)
+        
+        day_spedup_chunks = []
+        day_failed = False
+        # Seed timestamp once from the first file; carry it forward across all
+        # sequential source files so consecutive clips (_000, _001, ...) share
+        # the same filename timestamp but don't reset the clock.
+        day_offset_seconds: float | None = None
+        day_date_str: str | None = None
 
-        if do_chunk:
-            log.info(f"\n[CHUNK] {src.name}  "
-                     f"(duration={duration:.1f}s, chunk_duration={chunk_duration}s)")
-            try:
-                chunks = chunk_video(src, chunks_dir, chunk_duration)
-            except FFToolError as e:
-                log.error(f"  -> FAILED to chunk: {e}")
-                total_failed += 1
-                continue
-            log.info(f"  -> {len(chunks)} chunk(s) created in {chunks_dir.name}/")
-        else:
-            # Video is already ≤chunk_duration (or chunking disabled); treat it
-            # as a single "chunk" so the rest of the pipeline is identical.
-            chunks = [src]
-            log.info(f"\n[PROCESS] {src.name}  "
-                     f"(duration={duration:.1f}s, no chunking needed)")
+        for src in day_videos:
+            duration = _get_duration(src)
+            do_chunk = chunk_duration > 0 and (duration is None or duration > chunk_duration)
 
-        # Build overlay text once per source video (shared metadata).
-        # Chunk index is injected per-chunk below.
-        src_probe = _get_probe(src)
+            if do_chunk:
+                log.info(f"\n[CHUNK] {src.name}  "
+                         f"(duration={duration:.1f}s, chunk_duration={chunk_duration}s)")
+                try:
+                    chunks = chunk_video(src, chunks_dir, chunk_duration)
+                except FFToolError as e:
+                    log.error(f"  -> FAILED to chunk: {e}")
+                    total_failed += 1
+                    day_failed = True
+                    continue
+                log.info(f"  -> {len(chunks)} chunk(s) created in {chunks_dir.name}/")
 
-        # ------------------------------------------------------------------ #
-        # Speed up each chunk                                                  #
-        # ------------------------------------------------------------------ #
-        chunk_failed_any = False
-        for idx, chunk_path in enumerate(chunks, start=1):
-            # Build per-chunk overlay (includes chunk N/M counter if multi-chunk)
-            if args.no_overlay or src_probe is None:
-                overlay_text = None
+                # Stamp each chunk with its sequential start time so it
+                # is self-describing even when processed independently.
+                if day_date_str and day_offset_seconds is not None:
+                    base_date = datetime.datetime.strptime(day_date_str, "%Y-%m-%d").replace(
+                        tzinfo=datetime.timezone.utc
+                    )
+                    stamp_offset = day_offset_seconds
+                    for chunk_path in chunks:
+                        chunk_start_dt = base_date + datetime.timedelta(seconds=stamp_offset)
+                        try:
+                            stamp_chunk_creation_time(chunk_path, chunk_start_dt)
+                        except FFToolError as e:
+                            log.warning(f"  [TIME] Could not stamp {chunk_path.name}: {e}")
+                        chunk_dur = _get_duration(chunk_path) or chunk_duration
+                        stamp_offset += chunk_dur
             else:
-                overlay_text = make_overlay_text(
-                    src_probe, src,
-                    speed=speed,
-                    chunk_index=idx if len(chunks) > 1 else None,
-                    total_chunks=len(chunks) if len(chunks) > 1 else None,
+                chunks = [src]
+                log.info(f"\n[PROCESS] {src.name}  "
+                         f"(duration={duration:.1f}s, no chunking needed)")
+
+            src_probe = _get_probe(src)
+
+            # Only seed the clock from metadata/filename for the very first
+            # source file of the day.  Subsequent files continue where the
+            # previous one left off so the timer never jumps backward.
+            if day_offset_seconds is None:
+                start_dt = _parse_metadata_start_time(src_probe) if src_probe else None
+                if start_dt:
+                    day_date_str = start_dt.strftime("%Y-%m-%d")
+                    day_offset_seconds = (
+                        start_dt.hour * 3600
+                        + start_dt.minute * 60
+                        + start_dt.second
+                        + start_dt.microsecond / 1e6
+                    )
+                    log.info(f"  [TIME] Seeded from metadata creation_time → {start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} UTC")
+                else:
+                    log.warning(
+                        f"  [TIME] No 'creation_time' metadata found in {src.name}. "
+                        "Timestamp overlay will be disabled for this day."
+                    )
+
+            current_date_str = day_date_str
+            current_offset_seconds = day_offset_seconds
+
+            chunk_failed_any = False
+            source_spedup_chunks = []
+            
+            for idx, chunk_path in enumerate(chunks, start=1):
+                if args.no_overlay or src_probe is None:
+                    overlay_text = None
+                else:
+                    overlay_text = make_overlay_text(
+                        src_probe, chunk_path,
+                        speed=speed,
+                        current_date_str=current_date_str,
+                        pts_offset_seconds=current_offset_seconds,
+                    )
+
+                dest = folder / f"{chunk_path.stem}{suffix}{chunk_path.suffix}"
+
+                # Probe chunk before speedup to add to exact offset
+                if current_offset_seconds is not None:
+                    chunk_dur = _get_duration(chunk_path)
+                    if chunk_dur:
+                        current_offset_seconds += chunk_dur
+
+                if dest.exists():
+                    log.info(f"  Skipping (output exists): {chunk_path.name}")
+                    total_skipped += 1
+                    source_spedup_chunks.append(dest)
+                    continue
+
+                log.info(f"  Processing: {chunk_path.name} -> {dest.name}")
+                result = speed_up_video(
+                    chunk_path, dest, speed, log_dir,
+                    keep_fps=args.fps is None,
+                    target_fps=args.fps,
+                    overlay_text=overlay_text,
                 )
 
-            # Output sits alongside the *source* video, not in chunks/
-            dest = folder / f"{chunk_path.stem}{suffix}{chunk_path.suffix}"
+                if result.ok:
+                    total_processed += 1
+                    note = f" [{result.strategy}]"
+                    if result.message:
+                        note += f"\n    {result.message}"
+                    log.info(f"    -> OK{note}")
+                    source_spedup_chunks.append(dest)
+                else:
+                    total_failed += 1
+                    chunk_failed_any = True
+                    day_failed = True
+                    log.error(f"    -> FAILED: {result.message}")
 
-            if dest.exists():
-                log.info(f"  Skipping (output exists): {chunk_path.name}")
-                total_skipped += 1
-                continue
+            if do_chunk and not args.keep_chunks and not chunk_failed_any:
+                for chunk_path in chunks:
+                    chunk_path.unlink(missing_ok=True)
+                try:
+                    chunks_dir.rmdir()
+                except OSError:
+                    pass
 
-            log.info(f"  Processing: {chunk_path.name} -> {dest.name}")
-            result = speed_up_video(
-                chunk_path, dest, speed, log_dir,
-                keep_fps=args.fps is None,
-                target_fps=args.fps,
-                overlay_text=overlay_text,
-            )
+            day_spedup_chunks.extend(source_spedup_chunks)
+            # Carry the accumulated offset into the next source file.
+            day_offset_seconds = current_offset_seconds
 
-            if result.ok:
-                total_processed += 1
-                note = f" [{result.strategy}]"
-                if result.message:
-                    note += f"\n    {result.message}"
-                log.info(f"    -> OK{note}")
+        if day_spedup_chunks and not day_failed:
+            merged_dest = out_root / f"{day}_merged{day_spedup_chunks[0].suffix}"
+            log.info(f"\n[CONCAT] Merging {len(day_spedup_chunks)} videos into {merged_dest.name}...")
+            concat_log = log_dir / f"{day}_concat.log"
+            if concat_videos(day_spedup_chunks, merged_dest, concat_log):
+                log.info(f"  -> Concat OK: {merged_dest.name}")
+                if not args.keep_chunks:
+                    for p in day_spedup_chunks:
+                        p.unlink(missing_ok=True)
             else:
-                total_failed += 1
-                chunk_failed_any = True
-                log.error(f"    -> FAILED: {result.message}")
-
-        # Clean up chunk files unless --keep-chunks was requested or the
-        # source *was* the chunk (no splitting happened)
-        if do_chunk and not args.keep_chunks and not chunk_failed_any:
-            for chunk_path in chunks:
-                chunk_path.unlink(missing_ok=True)
-            # Remove the chunks dir if now empty
-            try:
-                chunks_dir.rmdir()
-            except OSError:
-                pass  # not empty — other chunks still there
+                log.error(f"  -> Concat FAILED. See {concat_log}")
 
     log.info("\n" + "-" * 60)
     log.info(

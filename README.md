@@ -4,6 +4,10 @@ Speed up video files while preserving audio pitch, with built-in tolerance
 for corrupted AAC audio streams (common on SJCAM / action-cam footage
 interrupted mid-recording).
 
+The tool automatically chunks large videos for stability, burns a highly accurate
+date/time overlay into the footage using video metadata, and seamlessly merges
+all processed videos from a given day into a final output file.
+
 ## Requirements
 
 - Python 3.9+
@@ -28,16 +32,31 @@ python -m video_speedup.cli /path/to/folder
 ## Usage
 
 ```bash
-video-speedup /path/to/folder
-video-speedup /path/to/folder --speed 3
-video-speedup /path/to/folder --speed 5 --fps 30
+# Basic – output goes to <input>/x5/ automatically
+video-speedup /path/to/videos
+python3 -m video_speedup.cli /path/to/videos
+
+# Explicit output folder
+video-speedup /path/to/videos --output /path/to/output
+python3 -m video_speedup.cli /path/to/videos -o /path/to/output
+
+# Full example: 5x speed, 60s chunks, custom output
+video-speedup /path/to/videos -o /path/to/output --speed 5 --chunk-duration 60
+python3 -m video_speedup.cli /path/to/videos -o /path/to/output --speed 5 --chunk-duration 60
 ```
 
-- Skips files whose name already ends in the speed suffix (e.g. `_5x`).
-- Skips files whose output already exists.
-- Never drops audio silently — tries multiple decode strategies before
-  giving up on a file.
-- Writes a per-file ffmpeg log to `<folder>/.video_speedup_logs/`.
+> `python3 -m video_speedup.cli` is equivalent to the `video-speedup` command and works without installing the package — just `cd` into the repo root first.
+
+
+### Features
+
+- **Chunking for Stability**: Use `--chunk-duration` to split large videos before processing. This prevents OOM errors or audio drift on long recordings. Temporary chunks are placed in a `chunks/` folder and cleaned up automatically.
+- **Accurate Timestamps**: Burns an overlay in the bottom-left corner with the exact recording date and time (precise to the millisecond). Derived from the container's `creation_time` metadata or the filename pattern (`YYYY_MMDD_HHMMSS_mmm.MP4`).
+- **Automatic Merging**: Groups source videos by day, processes them, and uses FFmpeg's `concat` demuxer to losslessly merge the speed-up chunks of each day together.
+- **Flexible Output**: Use `-o / --output <DIR>` to specify exactly where merged videos are written. Without it, outputs go to `<input>/x{speed}/` automatically.
+- **Agent Skill**: You can run `/speed-up-x5` in the chat to seamlessly speed up your videos!
+- **Resilient**: Skips files whose output already exists and never drops audio silently — tries multiple decode strategies before giving up.
+- **Diagnostics**: Writes per-file ffmpeg logs to `<input>/.video_speedup_logs/`.
 
 ## Duration diagnostic
 

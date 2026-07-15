@@ -66,9 +66,7 @@ def speed_up_video(
     if not keep_fps and target_fps:
         vf += f",fps={target_fps}"
     if overlay_text:
-        text_path = log_dir / f"{src.stem}_overlay.txt"
-        text_path.write_text(overlay_text)
-        vf += f",{make_drawtext_filter(text_path)}"
+        vf += f",{make_drawtext_filter(overlay_text)}"
 
     af = atempo_chain(speed)
 
