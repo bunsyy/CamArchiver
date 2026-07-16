@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import logging
 import sys
 import time
@@ -114,6 +115,77 @@ def _get_duration(path: Path) -> float | None:
     return p.format_duration if p else None
 
 
+def _format_duration(seconds: float) -> str:
+    if seconds is None:
+        return "0s"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    if h > 0:
+        return f"{h}h {m}m {s}s"
+    elif m > 0:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def _format_size(size_bytes: int) -> str:
+    if size_bytes == 0:
+        return "0 B"
+    units = ("B", "KB", "MB", "GB", "TB")
+    i = 0
+    size = float(size_bytes)
+    while size >= 1024 and i < len(units) - 1:
+        size /= 1024.0
+        i += 1
+    return f"{size:.2f} {units[i]}"
+
+
+def _write_markdown_report(report_path: Path, stats_dict: dict, speed: float, elapsed_str: str) -> None:
+    lines = [
+        f"# Video Speedup Report (x{speed:g})",
+        "",
+        f"**Total Execution Time (This Run):** {elapsed_str}",
+        "",
+        "| Date | Original Videos | Original Duration | Original Size | Final Duration | Final Size | Storage Saved |",
+        "|------|-----------------|-------------------|---------------|----------------|------------|---------------|"
+    ]
+    
+    total_orig = 0
+    total_final = 0
+    total_saved = 0
+    total_videos = 0
+    total_orig_dur = 0.0
+    total_final_dur = 0.0
+    
+    for day in sorted(stats_dict.keys()):
+        stat = stats_dict[day]
+        lines.append(
+            f"| {day} | {stat['num_videos']} | "
+            f"{_format_duration(stat['original_duration'])} | "
+            f"{_format_size(stat['original_bytes'])} | "
+            f"{_format_duration(stat['final_duration'])} | "
+            f"{_format_size(stat['final_bytes'])} | "
+            f"{_format_size(stat['saved_bytes'])} |"
+        )
+        total_orig += stat['original_bytes']
+        total_final += stat['final_bytes']
+        total_saved += stat['saved_bytes']
+        total_videos += stat['num_videos']
+        total_orig_dur += stat['original_duration']
+        total_final_dur += stat['final_duration']
+        
+    lines.append(
+        f"| **Total** | **{total_videos}** | "
+        f"**{_format_duration(total_orig_dur)}** | "
+        f"**{_format_size(total_orig)}** | "
+        f"**{_format_duration(total_final_dur)}** | "
+        f"**{_format_size(total_final)}** | "
+        f"**{_format_size(total_saved)}** |"
+    )
+    
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     start_time = time.time()
     args = build_parser().parse_args(argv)
@@ -211,8 +283,19 @@ def main(argv: list[str] | None = None) -> int:
     log.info(f"Found {len(source_videos)} source video(s) across {len(videos_by_day)} day(s).")
 
     total_processed = total_skipped = total_failed = 0
+    
+    report_stats = {}
+    history_file = out_root / ".conversion_history.json"
+    if history_file.exists():
+        try:
+            with open(history_file, "r") as f:
+                report_stats = json.load(f)
+        except Exception as e:
+            log.warning(f"Could not load history file: {e}")
 
     for day, day_videos in sorted(videos_by_day.items()):
+        original_bytes = sum(p.stat().st_size for p in day_videos if p.exists())
+        original_duration = sum((_get_duration(p) or 0.0) for p in day_videos if p.exists())
         log.info(f"\n{'=' * 60}\nProcessing day: {day}\n{'=' * 60}")
         day_videos.sort(key=lambda p: p.name)
         
@@ -264,33 +347,47 @@ def main(argv: list[str] | None = None) -> int:
 
             if do_chunk:
                 src_chunks_dir = chunks_dir / src.stem
-                log.info(f"\n[CHUNK] {src.name} (duration={duration:.1f}s, chunk_duration={chunk_duration}s)")
-                try:
-                    chunks = chunk_video(src, src_chunks_dir, chunk_duration)
-                except FFToolError as e:
-                    log.error(f"  -> FAILED to chunk: {e}")
-                    total_failed += 1
-                    day_failed = True
-                    continue
-                log.info(f"  -> {len(chunks)} chunk(s) created in {chunks_dir.name}/{src.stem}/")
-
-                # Stamp each chunk with its sequential start time
-                if day_date_str and day_offset_seconds is not None:
-                    base_date = datetime.datetime.strptime(day_date_str, "%Y-%m-%d").replace(
-                        tzinfo=datetime.timezone.utc
-                    )
-                    stamp_offset = day_offset_seconds
-                    for chunk_path in chunks:
-                        chunk_start_dt = base_date + datetime.timedelta(seconds=stamp_offset)
-                        try:
-                            stamp_chunk_creation_time(chunk_path, chunk_start_dt)
-                        except FFToolError as e:
-                            log.warning(f"  [TIME] Could not stamp {chunk_path.name}: {e}")
-                        chunk_dur = _get_duration(chunk_path) or chunk_duration
-                        stamp_offset += chunk_dur
+                done_file = src_chunks_dir / ".phase1_done"
+                
+                if done_file.exists():
+                    chunks = sorted(src_chunks_dir.glob(f"{src.stem}_chunk_*{src.suffix}"))
+                    log.info(f"\n[CHUNK] {src.name} (duration={duration:.1f}s, chunk_duration={chunk_duration}s) already exists in the chunks folder. Skipping it.")
                     
-                    # Advance the global clock for the NEXT source file (if it lacks metadata)
-                    day_offset_seconds = stamp_offset
+                    if day_offset_seconds is not None:
+                        stamp_offset = day_offset_seconds
+                        for chunk_path in chunks:
+                            stamp_offset += (_get_duration(chunk_path) or chunk_duration)
+                        day_offset_seconds = stamp_offset
+                else:
+                    log.info(f"\n[CHUNK] {src.name} (duration={duration:.1f}s, chunk_duration={chunk_duration}s)")
+                    try:
+                        chunks = chunk_video(src, src_chunks_dir, chunk_duration)
+                    except FFToolError as e:
+                        log.error(f"  -> FAILED to chunk: {e}")
+                        total_failed += 1
+                        day_failed = True
+                        continue
+                    log.info(f"  -> {len(chunks)} chunk(s) created in {chunks_dir.name}/{src.stem}/")
+    
+                    # Stamp each chunk with its sequential start time
+                    if day_date_str and day_offset_seconds is not None:
+                        base_date = datetime.datetime.strptime(day_date_str, "%Y-%m-%d").replace(
+                            tzinfo=datetime.timezone.utc
+                        )
+                        stamp_offset = day_offset_seconds
+                        for chunk_path in chunks:
+                            chunk_start_dt = base_date + datetime.timedelta(seconds=stamp_offset)
+                            try:
+                                stamp_chunk_creation_time(chunk_path, chunk_start_dt)
+                            except FFToolError as e:
+                                log.warning(f"  [TIME] Could not stamp {chunk_path.name}: {e}")
+                            chunk_dur = _get_duration(chunk_path) or chunk_duration
+                            stamp_offset += chunk_dur
+                        
+                        # Advance the global clock for the NEXT source file (if it lacks metadata)
+                        day_offset_seconds = stamp_offset
+                    
+                    done_file.touch()
             else:
                 chunks = [src]
                 src_chunks_dir = None
@@ -382,6 +479,30 @@ def main(argv: list[str] | None = None) -> int:
             concat_log = log_dir / f"{day}_concat.log"
             if concat_videos(day_spedup_chunks, merged_dest, concat_log):
                 log.info(f"  -> Concat OK: {merged_dest.name}")
+                
+                final_bytes = merged_dest.stat().st_size
+                final_duration = _get_duration(merged_dest) or 0.0
+                report_stats[day] = {
+                    "num_videos": len(day_videos),
+                    "original_bytes": original_bytes,
+                    "final_bytes": final_bytes,
+                    "saved_bytes": original_bytes - final_bytes,
+                    "original_duration": original_duration,
+                    "final_duration": final_duration
+                }
+                
+                # Live update the conversion report and history after this day is done
+                try:
+                    with open(history_file, "w") as f:
+                        json.dump(report_stats, f, indent=2)
+                except Exception as e:
+                    log.warning(f"Failed to write history file: {e}")
+                
+                report_path = out_root / "conversion_report.md"
+                elapsed_seconds = time.time() - start_time
+                elapsed_str = str(datetime.timedelta(seconds=int(elapsed_seconds)))
+                _write_markdown_report(report_path, report_stats, speed, elapsed_str)
+                
                 if not args.keep_chunks:
                     # Clean up raw chunks
                     for task in day_tasks:
@@ -408,6 +529,11 @@ def main(argv: list[str] | None = None) -> int:
         f"Skipped: {total_skipped} | Failed: {total_failed}"
     )
     log.info(f"Per-file ffmpeg logs saved in: {log_dir}")
+    
+    if report_stats:
+        report_path = out_root / "conversion_report.md"
+        _write_markdown_report(report_path, report_stats, speed, elapsed_str)
+        log.info(f"Markdown storage report saved to: {report_path}")
 
     if not args.keep_chunks:
         try:
