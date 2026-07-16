@@ -144,15 +144,13 @@ def _format_size(size_bytes: int) -> str:
     return f"{size:.2f} {units[i]}"
 
 
-def _write_markdown_report(report_path: Path, stats_dict: dict, speed: float, elapsed_str: str) -> None:
+def _write_markdown_report(report_path: Path, stats_dict: dict, speed: float) -> None:
     os_name = "macOS (Base-10)" if sys.platform == "darwin" else "Ubuntu/Windows (Base-2)"
     lines = [
         f"# Video Speedup Report (x{speed:g})",
         "",
-        f"**Total Execution Time (This Run):** {elapsed_str}",
-        "",
-        "| Date | Original Videos | Original Duration | Original Size | Final Duration | Final Size | Storage Saved | OS Format |",
-        "|------|-----------------|-------------------|---------------|----------------|------------|---------------|-----------|"
+        "| Date | Original Videos | Original Duration | Original Size | Final Duration | Final Size | Storage Saved | Execution Time | OS Format |",
+        "|------|-----------------|-------------------|---------------|----------------|------------|---------------|----------------|-----------|"
     ]
     
     total_orig = 0
@@ -171,6 +169,7 @@ def _write_markdown_report(report_path: Path, stats_dict: dict, speed: float, el
             f"{_format_duration(stat['final_duration'])} | "
             f"{_format_size(stat['final_bytes'])} | "
             f"{_format_size(stat['saved_bytes'])} | "
+            f"{stat.get('execution_time', '-')} | "
             f"{os_name} |"
         )
         total_orig += stat['original_bytes']
@@ -187,6 +186,7 @@ def _write_markdown_report(report_path: Path, stats_dict: dict, speed: float, el
         f"**{_format_duration(total_final_dur)}** | "
         f"**{_format_size(total_final)}** | "
         f"**{_format_size(total_saved)}** | "
+        f"**-** | "
         f"**-** |"
     )
     
@@ -303,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
     for day, day_videos in sorted(videos_by_day.items()):
         original_bytes = sum(p.stat().st_size for p in day_videos if p.exists())
         original_duration = sum((_get_duration(p) or 0.0) for p in day_videos if p.exists())
+        day_start_time = time.time()
         log.info(f"\n{'=' * 60}\nProcessing day: {day}\n{'=' * 60}")
         day_videos.sort(key=lambda p: p.name)
         
@@ -499,13 +500,16 @@ def main(argv: list[str] | None = None) -> int:
                 
                 final_bytes = merged_dest.stat().st_size
                 final_duration = _get_duration(merged_dest) or 0.0
+                day_elapsed_seconds = time.time() - day_start_time
+                day_elapsed_str = str(datetime.timedelta(seconds=int(day_elapsed_seconds)))
                 report_stats[day] = {
                     "num_videos": len(day_videos),
                     "original_bytes": original_bytes,
                     "final_bytes": final_bytes,
                     "saved_bytes": original_bytes - final_bytes,
                     "original_duration": original_duration,
-                    "final_duration": final_duration
+                    "final_duration": final_duration,
+                    "execution_time": day_elapsed_str,
                 }
                 
                 # Live update the conversion report and history after this day is done
@@ -516,9 +520,7 @@ def main(argv: list[str] | None = None) -> int:
                     log.warning(f"Failed to write history file: {e}")
                 
                 report_path = out_root / "conversion_report.md"
-                elapsed_seconds = time.time() - start_time
-                elapsed_str = str(datetime.timedelta(seconds=int(elapsed_seconds)))
-                _write_markdown_report(report_path, report_stats, speed, elapsed_str)
+                _write_markdown_report(report_path, report_stats, speed)
                 
                 if not args.keep_chunks:
                     # Clean up raw chunks
