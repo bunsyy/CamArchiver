@@ -323,8 +323,12 @@ def main(argv: list[str] | None = None) -> int:
 
         log.info("\n--- Phase 1: Chunking ---")
         day_tasks = []
+        total_src = len(day_videos)
 
-        for src in day_videos:
+        for i, src in enumerate(day_videos):
+            pct = int((i / total_src) * 100)
+            log.info(f"\n[PHASE 1] {pct}% - Analyzing {src.name}")
+            
             duration = _get_duration(src)
             do_chunk = chunk_duration > 0 and (duration is None or duration > chunk_duration)
             src_probe = _get_probe(src)
@@ -417,6 +421,8 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         log.info("\n--- Phase 2: Speed Up ---")
+        total_chunks = sum(len(t["chunks"]) for t in day_tasks)
+        chunks_done = 0
 
         for task in day_tasks:
             src_probe = task["src_probe"]
@@ -428,6 +434,7 @@ def main(argv: list[str] | None = None) -> int:
             source_spedup_chunks = []
             
             for idx, chunk_path in enumerate(chunks, start=1):
+                pct = int((chunks_done / total_chunks) * 100) if total_chunks > 0 else 100
                 if args.no_overlay or src_probe is None:
                     overlay_text = None
                 else:
@@ -447,12 +454,13 @@ def main(argv: list[str] | None = None) -> int:
                         current_offset_seconds += chunk_dur
 
                 if dest.exists():
-                    log.info(f"  Skipping (output exists): {chunk_path.name}")
+                    log.info(f"  [PHASE 2] {pct}% - Skipping (output exists): {chunk_path.name}")
                     total_skipped += 1
                     source_spedup_chunks.append(dest)
+                    chunks_done += 1
                     continue
 
-                log.info(f"  Processing: {chunk_path.name} -> {dest.name}")
+                log.info(f"  [PHASE 2] {pct}% - Processing: {chunk_path.name} -> {dest.name}")
                 result = speed_up_video(
                     chunk_path, dest, speed, log_dir,
                     keep_fps=args.fps is None,
@@ -476,6 +484,8 @@ def main(argv: list[str] | None = None) -> int:
                     chunk_failed_any = True
                     day_failed = True
                     log.error(f"    -> FAILED: {result.message}")
+                    
+                chunks_done += 1
 
             task["chunk_failed_any"] = chunk_failed_any
             day_spedup_chunks.extend(source_spedup_chunks)
@@ -517,7 +527,9 @@ def main(argv: list[str] | None = None) -> int:
                             for chunk_path in task["chunks"]:
                                 chunk_path.unlink(missing_ok=True)
                             try:
-                                if task["src_chunks_dir"]: task["src_chunks_dir"].rmdir()
+                                if task["src_chunks_dir"]: 
+                                    (task["src_chunks_dir"] / ".phase1_done").unlink(missing_ok=True)
+                                    task["src_chunks_dir"].rmdir()
                             except OSError:
                                 pass
                     # Clean up sped-up chunks
