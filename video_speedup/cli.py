@@ -131,23 +131,28 @@ def _format_duration(seconds: float) -> str:
 def _format_size(size_bytes: int) -> str:
     if size_bytes == 0:
         return "0 B"
+        
+    # macOS uses base-10. Ubuntu/Windows typically use base-2.
+    base = 1000.0 if sys.platform == "darwin" else 1024.0
+    
     units = ("B", "KB", "MB", "GB", "TB")
     i = 0
     size = float(size_bytes)
-    while size >= 1024 and i < len(units) - 1:
-        size /= 1024.0
+    while size >= base and i < len(units) - 1:
+        size /= base
         i += 1
     return f"{size:.2f} {units[i]}"
 
 
 def _write_markdown_report(report_path: Path, stats_dict: dict, speed: float, elapsed_str: str) -> None:
+    os_name = "macOS (Base-10)" if sys.platform == "darwin" else "Ubuntu/Windows (Base-2)"
     lines = [
         f"# Video Speedup Report (x{speed:g})",
         "",
         f"**Total Execution Time (This Run):** {elapsed_str}",
         "",
-        "| Date | Original Videos | Original Duration | Original Size | Final Duration | Final Size | Storage Saved |",
-        "|------|-----------------|-------------------|---------------|----------------|------------|---------------|"
+        "| Date | Original Videos | Original Duration | Original Size | Final Duration | Final Size | Storage Saved | OS Format |",
+        "|------|-----------------|-------------------|---------------|----------------|------------|---------------|-----------|"
     ]
     
     total_orig = 0
@@ -165,7 +170,8 @@ def _write_markdown_report(report_path: Path, stats_dict: dict, speed: float, el
             f"{_format_size(stat['original_bytes'])} | "
             f"{_format_duration(stat['final_duration'])} | "
             f"{_format_size(stat['final_bytes'])} | "
-            f"{_format_size(stat['saved_bytes'])} |"
+            f"{_format_size(stat['saved_bytes'])} | "
+            f"{os_name} |"
         )
         total_orig += stat['original_bytes']
         total_final += stat['final_bytes']
@@ -180,7 +186,8 @@ def _write_markdown_report(report_path: Path, stats_dict: dict, speed: float, el
         f"**{_format_size(total_orig)}** | "
         f"**{_format_duration(total_final_dur)}** | "
         f"**{_format_size(total_final)}** | "
-        f"**{_format_size(total_saved)}** |"
+        f"**{_format_size(total_saved)}** | "
+        f"**-** |"
     )
     
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
