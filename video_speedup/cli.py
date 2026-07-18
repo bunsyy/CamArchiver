@@ -553,7 +553,7 @@ def main(argv: list[str] | None = None) -> int:
     
     if report_stats:
         report_path = out_root / "conversion_report.md"
-        _write_markdown_report(report_path, report_stats, speed, elapsed_str)
+        _write_markdown_report(report_path, report_stats, speed)
         log.info(f"Markdown storage report saved to: {report_path}")
 
     if not args.keep_chunks:
